@@ -1,0 +1,341 @@
+// ipcurve — the curve: a value built once from validated knots and
+// evaluated as many times as the caller likes.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// ONE TYPE FOR EVERY METHOD, AND THAT IS THE DESIGN.  `IpCurve` is what
+// `iplinear.of_knots`, `ipspline.natural`, `ipspline.akima` and
+// `ipspline.pchip` all answer.  A caller who reads a method name out of
+// a configuration file and builds a curve gets the same type whichever
+// branch they took, and every downstream function — `at`, `derivative`,
+// `integral`, `resample` — takes that one type.
+//
+// The alternative is five types with five evaluators, and it is worse
+// for one concrete reason: the DOWNSTREAM functions are the ones that
+// cost anything.  `resample`, `integral` and `derivative` are written
+// once here, over one type, instead of five times each.
+//
+// What holds them together is the representation: every method in this
+// package produces a PIECEWISE CUBIC, and the differences between them
+// are entirely in how the coefficients were chosen.
+//
+//   nearest    a cubic whose linear and higher terms are zero
+//   linear     a cubic whose quadratic and cubic terms are zero
+//   natural    second derivative zero at both ends
+//   clamped    first derivative given at both ends
+//   not-a-knot the third derivative continuous across the second and
+//              second-to-last knots — scipy's default
+//   Akima      slopes from a local formula that ignores distant points
+//   PCHIP      slopes chosen so the result cannot overshoot
+//
+// Seven ways of picking four coefficients per interval.  `IpMethod`
+// records which one a curve was built by, so a plot legend and a log
+// line can say.
+//
+// EVALUATION IS TOTAL, and that is what `ipknots` buys.  `at` answers a
+// `Float` and not a `Result<Float, IpFault>`: the knots were validated
+// at construction, so there is nothing left to refuse.  The one
+// exception is `at_checked`, which is what a caller who chose
+// `IpExtrapError` calls — and it is a SEPARATE function rather than a
+// `Result` on the common path, so that a resample of a million points
+// is a loop over floats.
+
+// IpExtrap is what a curve does outside its knots.
+//
+// There is no default.  scipy's `interp1d` defaults to raising,
+// `numpy.interp` defaults to clamping, and `CubicSpline` defaults to
+// extrapolating the end polynomial — three libraries, three answers,
+// and each of them right for its own callers.  So this package names
+// all four and makes every constructor take one.
+pub enum IpExtrap
+    // Outside the domain, `at` answers the nearest endpoint's value —
+    // a flat line in both directions.  `numpy.interp`'s default, and
+    // the safe choice for a signal that physically cannot leave its
+    // range.
+    IpExtrapClamp
+    // Outside the domain, continue the straight line through the two
+    // nearest knots.  Bounded growth, and usually what a person means
+    // by "extend the trend".
+    IpExtrapLinear
+    // Outside the domain, continue the end interval's own cubic
+    // polynomial.  `CubicSpline`'s default, and the one that is
+    // smooth — the extrapolation has the same derivatives at the
+    // endpoint as the curve does.  It also grows cubically, so a point
+    // well outside the domain gets an answer nobody should trust.
+    IpExtrapPolynomial
+    // Outside the domain, `at` answers `fill` and `at_checked` answers
+    // `IpOutOfDomain`.  A NaN here is scipy's `fill_value=np.nan`, and
+    // any other number is a caller who has a meaningful sentinel.
+    IpExtrapFill(fill: Float)
+    // Outside the domain, `at_checked` answers `IpOutOfDomain` and `at`
+    // answers a NaN.
+    //
+    // The pair is deliberate: `at` stays total so the hot path has no
+    // error handling, and a caller who wants the refusal asks for it by
+    // calling the other function.  scipy's `bounds_error=True`.
+    IpExtrapError
+
+// IpMethod records how a curve's coefficients were chosen.
+//
+// Carried so that a plot legend, a log line and a test can say which
+// branch a configuration file selected, and so that `ipcurve.method`
+// can be asserted without evaluating anything.
+pub enum IpMethod
+    // Piecewise constant: the value of the nearer knot.
+    IpNearest
+    // Piecewise linear.
+    IpLinear
+    // Cubic spline, second derivative zero at both ends.
+    IpNatural
+    // Cubic spline, first derivative given at both ends.
+    IpClamped(start_slope: Float, end_slope: Float)
+    // Cubic spline, third derivative continuous across the second and
+    // second-to-last knots.  scipy's `CubicSpline` default.
+    IpNotAKnot
+    // Akima's local slopes.
+    IpAkima
+    // Piecewise cubic Hermite, slopes chosen to preserve monotonicity.
+    IpPchip
+
+// IpCurve is a piecewise cubic over validated knots, with a method and
+// an extrapolation policy.
+//
+// Built by `iplinear` or `ipspline`, evaluated here.  It is a value: it
+// can live in a struct beside the data it came from, be copied, be used
+// from two places, and it cannot be stale.
+//
+// ```novo
+// use ipknots
+// use iplinear
+// use ipcurve
+//
+// fn main() [io]
+//     match ipknots.of_lists([0.0, 1.0], [0.0, 2.0])
+//         Ok(k) =>
+//             let c = iplinear.of_knots(k, IpExtrapClamp)
+//             println("${ipcurve.at(c, 0.5)}")   // 1
+//         Err(e) => println(e.message())
+// ```
+pub struct IpCurve
+    // The knots this curve was built from.
+    knots: IpKnots
+    // Four coefficients per interval, `4 * (n - 1)` of them, in the
+    // order `[a0, b0, c0, d0, a1, …]` — the interval's polynomial is
+    // `a + b t + c t² + d t³` in the LOCAL coordinate `t = x - xs[i]`.
+    //
+    // Local and not global, which is the choice that matters: with a
+    // global `x` the cubic term of an interval at `x = 1e6` is `1e18`
+    // and the coefficients cancel catastrophically.  scipy's `PPoly`
+    // does the same thing for the same reason.
+    coefficients: [Float]
+    // Which method chose them.
+    method: IpMethod
+    // What happens outside the knots.
+    extrapolation: IpExtrap
+
+// The curve's value at `x`.
+//
+// TOTAL: it answers a `Float` for every input, including one outside
+// the domain — where the extrapolation policy decides, and
+// `IpExtrapError` answers a NaN.  There is no `Result` on this path,
+// because the knots were validated when the curve was built and
+// because this is the call that runs a million times.
+//
+// ```novo
+// use ipknots
+// use iplinear
+// use ipcurve
+//
+// fn main() [io]
+//     match ipknots.of_lists([0.0, 2.0], [0.0, 4.0])
+//         Ok(k) =>
+//             let c = iplinear.of_knots(k, IpExtrapClamp)
+//             println("${ipcurve.at(c, 1.0)}")   // 2
+//         Err(e) => println(e.message())
+// ```
+pub fn at(c: IpCurve, x: Float) -> Float []
+    todo("interpolate-nv.ipcurve.at")
+
+// The curve's value at `x`, refusing outside the domain under
+// `IpExtrapError`.
+//
+// The same answer as `at` for every other policy.  It exists so that
+// `at` can stay total: a caller who wants the refusal asks for it here,
+// and the hot path keeps no error handling it does not use.
+pub fn at_checked(c: IpCurve, x: Float) -> Result<Float, IpFault> []
+    todo("interpolate-nv.ipcurve.at_checked")
+
+// The curve's values at many points, in one call.
+//
+// One pass, with the interval search walking forward when the input is
+// sorted — which it is for a resample and for a plot's x axis, and
+// which turns `m` binary searches into one merge.  The check for
+// sortedness is `m` comparisons and pays for itself immediately.
+//
+// Total, like `at`.
+pub fn at_many(c: IpCurve, xs: [Float]) -> [Float] []
+    todo("interpolate-nv.ipcurve.at_many")
+
+// The knots the curve was built from.
+pub fn knots(c: IpCurve) -> IpKnots []
+    todo("interpolate-nv.ipcurve.knots")
+
+// Which method chose the coefficients.
+pub fn method(c: IpCurve) -> IpMethod []
+    todo("interpolate-nv.ipcurve.method")
+
+// The method's name, for a legend or a log line.
+//
+// scipy's own spellings — `"nearest"`, `"linear"`, `"natural"`,
+// `"clamped"`, `"not-a-knot"`, `"akima"`, `"pchip"` — so a plot drawn
+// from this package and one drawn from a Python notebook label the same
+// curve the same way.
+pub fn method_name(c: IpCurve) -> Str []
+    todo("interpolate-nv.ipcurve.method_name")
+
+// What the curve does outside its knots.
+pub fn extrapolation(c: IpCurve) -> IpExtrap []
+    todo("interpolate-nv.ipcurve.extrapolation")
+
+// The same curve with a different extrapolation policy.
+//
+// The coefficients do not depend on the policy, so this is a field
+// replacement and not a rebuild — which is what makes it reasonable to
+// evaluate one curve under two policies, clamping for a plot and
+// refusing for a calculation.
+pub fn with_extrapolation(c: IpCurve, e: IpExtrap) -> IpCurve []
+    todo("interpolate-nv.ipcurve.with_extrapolation")
+
+// The four coefficients of interval `i`, in the local coordinate
+// `t = x - xs[i]`.
+//
+// Published because a caller exporting a curve — to a plotting library,
+// to a spreadsheet, to firmware that will evaluate it with no
+// dependency — needs the polynomial itself, and because a test can
+// assert a coefficient rather than only a sampled value.
+//
+// `IpBadOrder` for an `i` outside `0 ..= count - 2`.
+pub fn interval_coefficients(c: IpCurve, i: Int) -> Result<[Float], IpFault> []
+    todo("interpolate-nv.ipcurve.interval_coefficients")
+
+// The `k`th derivative of the curve, as a curve of its own.
+//
+// A piecewise cubic differentiates to a piecewise quadratic, which this
+// package represents as a cubic whose top coefficient is zero — so the
+// answer is an `IpCurve` and everything above works on it unchanged.
+// That is the payoff of one curve type: `at`, `at_many` and `resample`
+// all apply to a derivative with nothing written twice.
+//
+// `k` of 0 is the curve itself; 4 and above is the zero curve, which is
+// correct rather than a refusal.  `IpBadOrder` for a negative `k`.
+//
+// A derivative is DISCONTINUOUS at the knots for `nearest` and
+// `linear`, and this package answers the RIGHT-hand value there — the
+// same convention scipy's `PPoly.derivative` uses.  For the cubic
+// methods the first and second derivatives are continuous by
+// construction and the third is not.
+//
+// ```novo
+// use ipknots
+// use iplinear
+// use ipcurve
+//
+// fn main() [io]
+//     match ipknots.of_lists([0.0, 2.0], [0.0, 4.0])
+//         Ok(k) =>
+//             let c = iplinear.of_knots(k, IpExtrapLinear)
+//             match ipcurve.derivative(c, 1)
+//                 Ok(d)  => println("${ipcurve.at(d, 1.0)}")   // 2
+//                 Err(e) => println(e.message())
+//         Err(e) => println(e.message())
+// ```
+pub fn derivative(c: IpCurve, k: Int) -> Result<IpCurve, IpFault> []
+    todo("interpolate-nv.ipcurve.derivative")
+
+// The curve's slope at `x`, without building a derivative curve.
+//
+// The convenience for a caller who wants one number — a Newton step, a
+// tangent line — where `derivative(c, 1)` then `at` would allocate a
+// whole curve for it.
+pub fn slope_at(c: IpCurve, x: Float) -> Float []
+    todo("interpolate-nv.ipcurve.slope_at")
+
+// The antiderivative of the curve, as a curve of its own, with the
+// constant chosen so that it is zero at the first knot.
+//
+// A piecewise cubic integrates to a piecewise QUARTIC, which an
+// `IpCurve` cannot hold — its intervals are cubic.  So this answers an
+// `IpQuartic` instead, and that type exists for exactly this one
+// reason.  `integral` is the call for a definite integral, and it is
+// what most callers actually want.
+pub fn antiderivative(c: IpCurve) -> IpQuartic []
+    todo("interpolate-nv.ipcurve.antiderivative")
+
+// IpQuartic is the antiderivative of a curve: five coefficients per
+// interval instead of four.
+//
+// It exists because integration raises the degree and `IpCurve`'s
+// intervals are cubic.  Rather than widen `IpCurve` to five
+// coefficients — which would make every cubic carry a zero and every
+// evaluation do one more multiply — the integral gets its own type,
+// with the two operations anybody performs on one.
+pub struct IpQuartic
+    // The knots, the same ones the curve had.
+    knots: IpKnots
+    // Five coefficients per interval, `5 * (n - 1)` of them, in the
+    // local coordinate `t = x - xs[i]`.
+    coefficients: [Float]
+    // What happens outside the knots, inherited from the curve.
+    extrapolation: IpExtrap
+
+// The antiderivative's value at `x`.  Total, like `ipcurve.at`.
+pub fn quartic_at(q: IpQuartic, x: Float) -> Float []
+    todo("interpolate-nv.ipcurve.quartic_at")
+
+// The definite integral of the curve from `a` to `b`.
+//
+// `quartic_at(q, b) - quartic_at(q, a)`, with the sign reversed when
+// `b` is below `a` — which is the convention every integral has and is
+// worth stating, because the alternative reading is an absolute area
+// and somebody will assume it.
+//
+// The call most callers want; `antiderivative` is for the one who needs
+// the whole function.
+//
+// ```novo
+// use ipknots
+// use iplinear
+// use ipcurve
+//
+// fn main() [io]
+//     match ipknots.of_lists([0.0, 2.0], [1.0, 1.0])
+//         Ok(k) =>
+//             let c = iplinear.of_knots(k, IpExtrapClamp)
+//             println("${ipcurve.integral(c, 0.0, 2.0)}")   // 2
+//         Err(e) => println(e.message())
+// ```
+pub fn integral(c: IpCurve, a: Float, b: Float) -> Float []
+    todo("interpolate-nv.ipcurve.integral")
+
+// The curve resampled onto `count` evenly spaced points from `lo` to
+// `hi` inclusive.
+//
+// The call a notebook makes: two time series on different sample grids
+// become two on one grid, and then they can be subtracted.  It is
+// `ipknots.linspace` and `at_many` in one, which is worth naming
+// because it is the thing the package exists to do.
+//
+// `IpBadGrid` for a count below 1.
+pub fn resample(c: IpCurve, lo: Float, hi: Float, count: Int) -> Result<[Float], IpFault> []
+    todo("interpolate-nv.ipcurve.resample")
+
+// The curve resampled onto the caller's own grid, as an `IpKnots` ready
+// to build another curve from.
+//
+// The difference from `at_many` is the return type: this answers the
+// grid AND the values, validated, which is what a caller chaining a
+// resample into another interpolation needs.  The grid must be strictly
+// increasing, which is what `IpKnots` means.
+pub fn resample_onto(c: IpCurve, grid: [Float]) -> Result<IpKnots, IpFault> []
+    todo("interpolate-nv.ipcurve.resample_onto")

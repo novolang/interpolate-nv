@@ -1,0 +1,698 @@
+// tests/interpolate_tests.nv — the cases where interpolation has one
+// answer, the properties each method promises, and the two places this
+// package disagrees with scipy on purpose.
+//
+// They COMPILE today and they FAIL at run, with `not implemented:
+// interpolate-nv.<module>.<fn>` from the `todo()` that is each body.
+// That is the expected state of an interface release: the compiler has
+// checked every signature, every type and every effect row, and nothing
+// else has been checked because there is nothing else yet.
+//
+// WHERE THE VECTORS COME FROM.  Interpolation has closed-form answers
+// far more often than the other numerics in this lane, so most of these
+// are exact:
+//
+//   - EVERY METHOD PASSES THROUGH ITS KNOTS.  `at(c, xs[i])` is
+//     `ys[i]`, for all seven.  That is the definition of interpolation
+//     and it is the first thing a wrong implementation breaks.
+//   - LINEAR DATA INTERPOLATES LINEARLY.  Every method here reproduces
+//     a straight line exactly, because every one of them is exact on
+//     polynomials of degree 1 or more.
+//   - THE PROPERTIES.  PCHIP does not overshoot — asserted through
+//     `ipspline.range_of`, which computes the extrema exactly from the
+//     coefficients rather than by sampling.  A natural spline's second
+//     derivative is zero at the ends.  A not-a-knot spline reproduces a
+//     true cubic exactly, which neither of the other two does.
+//   - THE INTEGRALS.  A linear curve's integral is a trapezium, and a
+//     trapezium's area is a number anybody can check.
+//
+// TOLERANCE.  `1e-12` on an evaluation, which is a handful of flops
+// above the double-precision floor; `1e-10` on anything that came
+// through the tridiagonal solve a classical spline needs.  A method
+// that is wrong is wrong by O(1).
+
+use std.test
+use ndfloat
+use ipfault
+use ipknots
+use ipcurve
+use iplinear
+use ipspline
+use ipgrid
+use ipbspline
+
+// ── the validated knots, which is where all the checking lives ──────
+
+@test
+fn test_the_knots_are_validated_once_and_the_evaluators_are_then_total()
+    match ipknots.of_lists([0.0, 1.0, 2.0], [0.0, 1.0, 4.0])
+        Ok(k)  =>
+            test.assert_eq(ipknots.count(k), 3)
+            test.assert_eq(ipknots.xs(k), [0.0, 1.0, 2.0])
+            test.assert_eq(ipknots.ys(k), [0.0, 1.0, 4.0])
+            test.assert_approx(ipknots.lo(k), 0.0, 1e-12)
+            test.assert_approx(ipknots.hi(k), 2.0, 1e-12)
+            test.assert_eq(ipknots.contains(k, 1.0), true)
+            test.assert_eq(ipknots.contains(k, 3.0), false)
+            test.assert_eq(ipknots.is_uniform(k, 1e-12), true)
+            // The interval search clamps at both ends, so every
+            // extrapolation policy is arithmetic over a usable interval
+            // rather than a special case before one.
+            test.assert_eq(ipknots.interval(k, 1.5), 1)
+            test.assert_eq(ipknots.interval(k, -9.0), 0)
+            test.assert_eq(ipknots.interval(k, 9.0), 1)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_an_unsorted_knot_list_is_refused_rather_than_sorted()
+    // Sorting would permute the values to match, which is a data
+    // transformation a caller should have asked for — and unsorted x
+    // values are usually a bug rather than an ordering preference.
+    match ipknots.of_lists([0.0, 2.0, 1.0], [0.0, 1.0, 2.0])
+        Ok(_)  => test.fail("that list descends at index 2")
+        Err(e) =>
+            match e
+                IpKnotsNotSorted(at, prev, cur) =>
+                    test.assert_eq(at, 2)
+                    test.assert_approx(prev, 2.0, 1e-12)
+                    test.assert_approx(cur, 1.0, 1e-12)
+                _                               => test.fail("expected IpKnotsNotSorted: ${e.message()}")
+            test.assert_eq(ipfault.is_construction_fault(e), true)
+            match ipfault.knot_index(e)
+                Some(i) => test.assert_eq(i, 2)
+                None    => test.fail("that refusal names a knot")
+    // And the explicit sort is a separate call, so reaching for it is a
+    // decision.
+    match ipknots.sorted_by_x([0.0, 2.0, 1.0], [0.0, 4.0, 1.0])
+        Ok(k)  =>
+            test.assert_eq(ipknots.xs(k), [0.0, 1.0, 2.0])
+            test.assert_eq(ipknots.ys(k), [0.0, 1.0, 4.0])
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_other_four_construction_refusals()
+    // Two equal knots make a zero-width interval, and every method here
+    // divides by one.
+    match ipknots.of_lists([0.0, 1.0, 1.0], [0.0, 1.0, 2.0])
+        Ok(_)  => test.fail("two equal knots make a zero-width interval")
+        Err(e) =>
+            match e
+                IpDuplicateKnot(at, v) =>
+                    test.assert_eq(at, 2)
+                    test.assert_approx(v, 1.0, 1e-12)
+                _                      => test.fail("expected IpDuplicateKnot: ${e.message()}")
+    match ipknots.of_lists([0.0, 1.0], [0.0])
+        Ok(_)  => test.fail("one value for two knots")
+        Err(e) =>
+            match e
+                IpLengthMismatch(nk, nv) =>
+                    test.assert_eq(nk, 2)
+                    test.assert_eq(nv, 1)
+                _                        => test.fail("expected IpLengthMismatch: ${e.message()}")
+    match ipknots.of_lists([0.0], [0.0])
+        Ok(_)  => test.fail("one point is not an interpolation")
+        Err(e) =>
+            match e
+                IpTooFewKnots(_, need, got) =>
+                    test.assert_eq(need, 2)
+                    test.assert_eq(got, 1)
+                _                           => test.fail("expected IpTooFewKnots: ${e.message()}")
+    // A NaN in a knot list makes every comparison in the binary search
+    // false, so the curve would be silently wrong rather than obviously
+    // so.
+    match ipknots.of_lists([0.0, 1.0 / 0.0], [0.0, 1.0])
+        Ok(_)  => test.fail("an infinity is not a knot")
+        Err(e) =>
+            match e
+                IpNotFinite(_, at) => test.assert_eq(at, 1)
+                _                  => test.fail("expected IpNotFinite: ${e.message()}")
+
+@test
+fn test_a_regular_grid_is_what_a_resample_is_written_onto()
+    match ipknots.linspace(0.0, 1.0, 3)
+        Ok(g)  =>
+            test.assert_eq(g.len(), 3)
+            test.assert_approx(g[0], 0.0, 1e-12)
+            test.assert_approx(g[1], 0.5, 1e-12)
+            test.assert_approx(g[2], 1.0, 1e-12)
+        Err(e) => test.fail(e.message())
+    // A count of one is the degenerate case numpy's linspace also
+    // admits.
+    match ipknots.linspace(2.0, 5.0, 1)
+        Ok(g)  =>
+            test.assert_eq(g.len(), 1)
+            test.assert_approx(g[0], 2.0, 1e-12)
+        Err(e) => test.fail(e.message())
+    match ipknots.linspace(0.0, 1.0, 0)
+        Ok(_)  => test.fail("a grid has at least one point")
+        Err(e) =>
+            match e
+                IpBadGrid(n) => test.assert_eq(n, 0)
+                _            => test.fail("expected IpBadGrid: ${e.message()}")
+
+// ── linear and nearest ──────────────────────────────────────────────
+
+@test
+fn test_a_linear_curve_passes_through_its_knots_and_halves_the_middle()
+    match ipknots.of_lists([0.0, 2.0], [0.0, 4.0])
+        Ok(k)  =>
+            let c = iplinear.of_knots(k, IpExtrapClamp)
+            // Through the knots: the definition of interpolation, and
+            // the first thing a wrong implementation breaks.
+            test.assert_approx(ipcurve.at(c, 0.0), 0.0, 1e-12)
+            test.assert_approx(ipcurve.at(c, 2.0), 4.0, 1e-12)
+            test.assert_approx(ipcurve.at(c, 1.0), 2.0, 1e-12)
+            test.assert_eq(ipcurve.method_name(c), "linear")
+            match ipcurve.method(c)
+                IpLinear => test.assert_eq(true, true)
+                _        => test.fail("that curve is linear")
+            test.assert_eq(ipknots.count(ipcurve.knots(c)), 2)
+            // Many points in one pass, which is what a plot's x axis
+            // and a resample both are.
+            let ys = ipcurve.at_many(c, [0.0, 1.0, 2.0])
+            test.assert_eq(ys.len(), 3)
+            test.assert_approx(ys[1], 2.0, 1e-12)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_nearest_curve_is_a_lookup_table_with_a_stated_tie_rule()
+    // At the exact midpoint it answers the RIGHT knot's value.  A rule
+    // stated is worth more than a rule that is merely right, because a
+    // caller sampling a step function on a grid will land on every
+    // midpoint.
+    match ipknots.of_lists([0.0, 2.0], [10.0, 20.0])
+        Ok(k)  =>
+            let c = iplinear.nearest(k, IpExtrapClamp)
+            test.assert_approx(ipcurve.at(c, 0.4), 10.0, 1e-12)
+            test.assert_approx(ipcurve.at(c, 1.6), 20.0, 1e-12)
+            test.assert_approx(ipcurve.at(c, 1.0), 20.0, 1e-12)
+            test.assert_eq(ipcurve.method_name(c), "nearest")
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_four_extrapolation_policies_each_answer_something_different()
+    // There is no default, because scipy raises, numpy clamps and
+    // CubicSpline extrapolates — three libraries, three answers, each
+    // right for its own callers.
+    match ipknots.of_lists([0.0, 1.0], [0.0, 1.0])
+        Ok(k)  =>
+            let clamped = iplinear.of_knots(k, IpExtrapClamp)
+            test.assert_approx(ipcurve.at(clamped, 5.0), 1.0, 1e-12)
+            test.assert_approx(ipcurve.at(clamped, -5.0), 0.0, 1e-12)
+            let linear = iplinear.of_knots(k, IpExtrapLinear)
+            test.assert_approx(ipcurve.at(linear, 5.0), 5.0, 1e-12)
+            let filled = iplinear.of_knots(k, IpExtrapFill(fill: -1.0))
+            test.assert_approx(ipcurve.at(filled, 5.0), -1.0, 1e-12)
+            test.assert_approx(ipcurve.at(filled, 0.5), 0.5, 1e-12)
+            // The policy is a field replacement and not a rebuild, so
+            // one curve can be clamped for a plot and refusing for a
+            // calculation.
+            let refusing = ipcurve.with_extrapolation(clamped, IpExtrapError)
+            match ipcurve.extrapolation(refusing)
+                IpExtrapError => test.assert_eq(true, true)
+                _             => test.fail("that policy was just set")
+            // `at` stays total so the hot path has no error handling;
+            // the refusal is a separate call.
+            match ipcurve.at_checked(refusing, 5.0)
+                Ok(_)  => test.fail("5 is outside [0, 1]")
+                Err(e) =>
+                    match e
+                        IpOutOfDomain(x, lo, hi) =>
+                            test.assert_approx(x, 5.0, 1e-12)
+                            test.assert_approx(lo, 0.0, 1e-12)
+                            test.assert_approx(hi, 1.0, 1e-12)
+                        _                        => test.fail("expected IpOutOfDomain: ${e.message()}")
+                    // The one refusal that is not about construction.
+                    test.assert_eq(ipfault.is_construction_fault(e), false)
+                    match ipfault.knot_index(e)
+                        Some(_) => test.fail("that refusal names no knot")
+                        None    => test.assert_eq(true, true)
+            match ipcurve.at_checked(refusing, 0.5)
+                Ok(y)  => test.assert_approx(y, 0.5, 1e-12)
+                Err(e) => test.fail(e.message())
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_one_shot_forms_are_numpy_interp_under_another_name()
+    match iplinear.interp([0.0, 2.0], [0.0, 4.0], 1.0, IpExtrapClamp)
+        Ok(y)  => test.assert_approx(y, 2.0, 1e-12)
+        Err(e) => test.fail(e.message())
+    match iplinear.interp_many([0.0, 2.0], [0.0, 4.0], [0.5, 1.5], IpExtrapClamp)
+        Ok(ys) =>
+            test.assert_eq(ys.len(), 2)
+            test.assert_approx(ys[0], 1.0, 1e-12)
+            test.assert_approx(ys[1], 3.0, 1e-12)
+        Err(e) => test.fail(e.message())
+    // They validate on the way through, because they are the one path
+    // into the package that does not start with `IpKnots`.
+    match iplinear.interp([1.0, 0.0], [0.0, 1.0], 0.5, IpExtrapClamp)
+        Ok(_)  => test.fail("that knot list descends")
+        Err(_) => test.assert_eq(true, true)
+
+// ── the cubic methods ───────────────────────────────────────────────
+
+@test
+fn test_every_cubic_method_passes_through_its_knots()
+    // The definition of interpolation.  Five methods, one assertion,
+    // and it is the first thing a wrong implementation breaks.
+    match ipknots.of_lists([0.0, 1.0, 2.0, 3.0, 4.0], [0.0, 1.0, 0.0, 1.0, 0.0])
+        Ok(k)  =>
+            match ipspline.natural(k, IpExtrapPolynomial)
+                Ok(c)  =>
+                    test.assert_approx(ipcurve.at(c, 2.0), 0.0, 1e-10)
+                    test.assert_eq(ipcurve.method_name(c), "natural")
+                Err(e) => test.fail(e.message())
+            match ipspline.clamped(k, 0.0, 0.0, IpExtrapPolynomial)
+                Ok(c)  =>
+                    test.assert_approx(ipcurve.at(c, 3.0), 1.0, 1e-10)
+                    test.assert_eq(ipcurve.method_name(c), "clamped")
+                    match ipcurve.method(c)
+                        IpClamped(s0, s1) =>
+                            test.assert_approx(s0, 0.0, 1e-12)
+                            test.assert_approx(s1, 0.0, 1e-12)
+                        _                 => test.fail("that curve is clamped")
+                Err(e) => test.fail(e.message())
+            match ipspline.not_a_knot(k, IpExtrapPolynomial)
+                Ok(c)  =>
+                    test.assert_approx(ipcurve.at(c, 1.0), 1.0, 1e-10)
+                    test.assert_eq(ipcurve.method_name(c), "not-a-knot")
+                Err(e) => test.fail(e.message())
+            match ipspline.akima(k, IpExtrapLinear)
+                Ok(c)  =>
+                    test.assert_approx(ipcurve.at(c, 2.0), 0.0, 1e-10)
+                    test.assert_eq(ipcurve.method_name(c), "akima")
+                Err(e) => test.fail(e.message())
+            match ipspline.pchip(k, IpExtrapLinear)
+                Ok(c)  =>
+                    test.assert_approx(ipcurve.at(c, 4.0), 0.0, 1e-10)
+                    test.assert_eq(ipcurve.method_name(c), "pchip")
+                Err(e) => test.fail(e.message())
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_each_method_refuses_below_the_number_of_points_it_needs()
+    // Four different minimums, and each says which method refused —
+    // because a caller who passed four points to three constructors
+    // wants to know which one.
+    match ipknots.of_lists([0.0, 1.0], [0.0, 1.0])
+        Ok(two) =>
+            match ipspline.natural(two, IpExtrapClamp)
+                Ok(_)  => test.fail("two points have no second derivative to set")
+                Err(e) =>
+                    match e
+                        IpTooFewKnots(_, need, got) =>
+                            test.assert_eq(need, 3)
+                            test.assert_eq(got, 2)
+                        _                           => test.fail("expected IpTooFewKnots: ${e.message()}")
+            match ipspline.pchip(two, IpExtrapClamp)
+                Ok(_)  => test.fail("PCHIP needs three points")
+                Err(_) => test.assert_eq(true, true)
+        Err(e)  => test.fail(e.message())
+    match ipknots.of_lists([0.0, 1.0, 2.0], [0.0, 1.0, 0.0])
+        Ok(three) =>
+            // Not-a-knot is about the second and second-to-last knots,
+            // and with three points those are the same knot.
+            match ipspline.not_a_knot(three, IpExtrapClamp)
+                Ok(_)  => test.fail("not-a-knot needs four points")
+                Err(e) =>
+                    match e
+                        IpTooFewKnots(_, need, _) => test.assert_eq(need, 4)
+                        _                         => test.fail("expected IpTooFewKnots: ${e.message()}")
+            // Akima's formula looks two knots in each direction.
+            match ipspline.akima(three, IpExtrapClamp)
+                Ok(_)  => test.fail("Akima needs five points")
+                Err(e) =>
+                    match e
+                        IpTooFewKnots(_, need, _) => test.assert_eq(need, 5)
+                        _                         => test.fail("expected IpTooFewKnots: ${e.message()}")
+            // A clamped slope that is not a number would propagate
+            // through the tridiagonal solve and make the whole curve a
+            // NaN, silently.
+            match ipspline.clamped(three, 1.0 / 0.0, 0.0, IpExtrapClamp)
+                Ok(_)  => test.fail("an infinite end slope is not a slope")
+                Err(_) => test.assert_eq(true, true)
+        Err(e)    => test.fail(e.message())
+
+@test
+fn test_pchip_does_not_overshoot_and_a_natural_spline_does()
+    // The case that makes the difference visible, and the reason both
+    // methods exist: a flat run, a step, another flat run.  A classical
+    // spline dips below zero before it rises and overshoots one after;
+    // PCHIP does neither.
+    match ipknots.of_lists([0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+                           [0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
+        Ok(k)  =>
+            match ipspline.pchip(k, IpExtrapClamp)
+                Ok(c)  =>
+                    // The extrema are computed exactly from the
+                    // coefficients — a piecewise cubic's are at the
+                    // knots and at the roots of its derivative — rather
+                    // than by sampling and hoping.
+                    let r = ipspline.range_of(c)
+                    test.assert_eq(r.lo >= -1e-12, true)
+                    test.assert_eq(r.hi <= 1.0 + 1e-12, true)
+                    test.assert_eq(ipspline.is_monotone(c, 1e-12), true)
+                Err(e) => test.fail(e.message())
+            match ipspline.natural(k, IpExtrapClamp)
+                Ok(c)  =>
+                    // The classical spline leaves the data's range, and
+                    // that is not a defect — it is the property PCHIP
+                    // was invented to avoid.
+                    let r = ipspline.range_of(c)
+                    test.assert_eq(r.lo < 0.0, true)
+                Err(e) => test.fail(e.message())
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_slopes_each_local_method_chooses_are_reachable_on_their_own()
+    match ipknots.of_lists([0.0, 1.0, 2.0, 3.0, 4.0], [0.0, 1.0, 2.0, 3.0, 4.0])
+        Ok(k)  =>
+            // Straight-line data: every slope is 1, under both local
+            // rules, and any implementation that gets this wrong is
+            // wrong everywhere.
+            match ipspline.pchip_slopes(k)
+                Ok(s)  =>
+                    test.assert_eq(s.len(), 5)
+                    test.assert_approx(s[2], 1.0, 1e-12)
+                Err(e) => test.fail(e.message())
+            match ipspline.akima_slopes(k)
+                Ok(s)  =>
+                    test.assert_eq(s.len(), 5)
+                    test.assert_approx(s[2], 1.0, 1e-12)
+                Err(e) => test.fail(e.message())
+            // And the primitive all five methods are written on: given
+            // a value and a slope at each knot, the cubic is determined.
+            match ipspline.hermite(k, [1.0, 1.0, 1.0, 1.0, 1.0], IpExtrapLinear)
+                Ok(c)  => test.assert_approx(ipcurve.at(c, 2.5), 2.5, 1e-12)
+                Err(e) => test.fail(e.message())
+            match ipspline.hermite(k, [1.0, 1.0], IpExtrapLinear)
+                Ok(_)  => test.fail("one slope per knot")
+                Err(e) =>
+                    match e
+                        IpLengthMismatch(_, _) => test.assert_eq(true, true)
+                        _                      => test.fail("expected IpLengthMismatch: ${e.message()}")
+        Err(e) => test.fail(e.message())
+
+// ── derivatives and integrals ───────────────────────────────────────
+
+@test
+fn test_a_derivative_is_a_curve_and_everything_above_works_on_it()
+    // The payoff of one curve type: `at`, `at_many` and `resample` all
+    // apply to a derivative with nothing written twice.
+    match ipknots.of_lists([0.0, 2.0], [0.0, 4.0])
+        Ok(k)  =>
+            let c = iplinear.of_knots(k, IpExtrapLinear)
+            match ipcurve.derivative(c, 1)
+                Ok(d)  =>
+                    test.assert_approx(ipcurve.at(d, 1.0), 2.0, 1e-12)
+                    // The derivative of a straight line is a constant,
+                    // so its own derivative is zero.
+                    match ipcurve.derivative(d, 1)
+                        Ok(dd) => test.assert_approx(ipcurve.at(dd, 1.0), 0.0, 1e-12)
+                        Err(e) => test.fail(e.message())
+                Err(e) => test.fail(e.message())
+            // Order 0 is the curve itself; order 4 and above is the
+            // zero curve, which is correct rather than a refusal.
+            match ipcurve.derivative(c, 0)
+                Ok(d)  => test.assert_approx(ipcurve.at(d, 1.0), 2.0, 1e-12)
+                Err(e) => test.fail(e.message())
+            match ipcurve.derivative(c, 9)
+                Ok(d)  => test.assert_approx(ipcurve.at(d, 1.0), 0.0, 1e-12)
+                Err(e) => test.fail(e.message())
+            match ipcurve.derivative(c, -1)
+                Ok(_)  => test.fail("a derivative order is not negative")
+                Err(e) =>
+                    match e
+                        IpBadOrder(_, o) => test.assert_eq(o, -1)
+                        _                => test.fail("expected IpBadOrder: ${e.message()}")
+            // The one-number form, so a Newton step does not allocate a
+            // whole curve.
+            test.assert_approx(ipcurve.slope_at(c, 1.0), 2.0, 1e-12)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_an_integral_of_a_flat_line_is_a_rectangle_and_the_sign_reverses()
+    // A constant 1 from 0 to 2 has area 2, and reversing the limits
+    // negates it — the convention every integral has, and worth
+    // asserting because the alternative reading is an absolute area.
+    match ipknots.of_lists([0.0, 2.0], [1.0, 1.0])
+        Ok(k)  =>
+            let c = iplinear.of_knots(k, IpExtrapClamp)
+            test.assert_approx(ipcurve.integral(c, 0.0, 2.0), 2.0, 1e-12)
+            test.assert_approx(ipcurve.integral(c, 2.0, 0.0), -2.0, 1e-12)
+            test.assert_approx(ipcurve.integral(c, 0.0, 0.0), 0.0, 1e-12)
+            // The antiderivative is a QUARTIC and needs its own type,
+            // because integration raises the degree and an `IpCurve`'s
+            // intervals are cubic.
+            let q = ipcurve.antiderivative(c)
+            test.assert_approx(ipcurve.quartic_at(q, 0.0), 0.0, 1e-12)
+            test.assert_approx(ipcurve.quartic_at(q, 2.0), 2.0, 1e-12)
+        Err(e) => test.fail(e.message())
+    // A straight line from 0 to 4 over 0 to 2: a triangle of area 4.
+    match ipknots.of_lists([0.0, 2.0], [0.0, 4.0])
+        Ok(k)  =>
+            let c = iplinear.of_knots(k, IpExtrapClamp)
+            test.assert_approx(ipcurve.integral(c, 0.0, 2.0), 4.0, 1e-12)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_a_resample_is_what_puts_two_series_on_one_grid()
+    match ipknots.of_lists([0.0, 1.0, 2.0], [0.0, 2.0, 4.0])
+        Ok(k)  =>
+            let c = iplinear.of_knots(k, IpExtrapClamp)
+            match ipcurve.resample(c, 0.0, 2.0, 5)
+                Ok(ys) =>
+                    test.assert_eq(ys.len(), 5)
+                    test.assert_approx(ys[0], 0.0, 1e-12)
+                    test.assert_approx(ys[2], 2.0, 1e-12)
+                    test.assert_approx(ys[4], 4.0, 1e-12)
+                Err(e) => test.fail(e.message())
+            match ipcurve.resample(c, 0.0, 2.0, 0)
+                Ok(_)  => test.fail("a grid has at least one point")
+                Err(_) => test.assert_eq(true, true)
+            // The other form answers knots, which is what a caller
+            // chaining a resample into another interpolation needs.
+            match ipcurve.resample_onto(c, [0.5, 1.5])
+                Ok(k2) =>
+                    test.assert_eq(ipknots.count(k2), 2)
+                    test.assert_eq(ipknots.ys(k2).len(), 2)
+                Err(e) => test.fail(e.message())
+            // The coefficients themselves, for a caller exporting the
+            // polynomial.
+            match ipcurve.interval_coefficients(c, 0)
+                Ok(co) => test.assert_eq(co.len(), 4)
+                Err(e) => test.fail(e.message())
+            match ipcurve.interval_coefficients(c, 9)
+                Ok(_)  => test.fail("that curve has two intervals")
+                Err(_) => test.assert_eq(true, true)
+        Err(e) => test.fail(e.message())
+
+// ── the two-dimensional grid ────────────────────────────────────────
+
+@test
+fn test_a_grid_is_validated_against_its_two_axes()
+    match ndfloat.of_list([0.0, 1.0, 2.0, 3.0], [2, 2])
+        Ok(z)  =>
+            match ipgrid.of_grid([0.0, 1.0], [0.0, 1.0], z, IpExtrapClamp)
+                Ok(g)  =>
+                    test.assert_eq(ipgrid.rows(g), 2)
+                    test.assert_eq(ipgrid.cols(g), 2)
+                    test.assert_eq(ipgrid.xs(g), [0.0, 1.0])
+                    test.assert_eq(ipgrid.ys(g), [0.0, 1.0])
+                    test.assert_eq(ndfloat.rank(ipgrid.values(g)), 2)
+                Err(e) => test.fail(e.message())
+            // The axes and the extents have to agree, and the refusal
+            // names all four numbers because "shape mismatch" without
+            // them is a message a reader has to reproduce to act on.
+            match ipgrid.of_grid([0.0, 1.0, 2.0], [0.0, 1.0], z, IpExtrapClamp)
+                Ok(_)  => test.fail("three x values against two rows")
+                Err(e) =>
+                    match e
+                        IpGridMismatch(wr, wc, gr, gc) =>
+                            test.assert_eq(wr, 3)
+                            test.assert_eq(wc, 2)
+                            test.assert_eq(gr, 2)
+                            test.assert_eq(gc, 2)
+                        _                              => test.fail("expected IpGridMismatch: ${e.message()}")
+        Err(e) => test.fail(e.message())
+    match ndfloat.of_list([0.0, 1.0], [2])
+        Ok(v)  =>
+            match ipgrid.of_grid([0.0, 1.0], [0.0, 1.0], v, IpExtrapClamp)
+                Ok(_)  => test.fail("a grid is rank 2")
+                Err(e) =>
+                    match e
+                        IpNotGrid(r) => test.assert_eq(r, 1)
+                        _            => test.fail("expected IpNotGrid: ${e.message()}")
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_bilinear_interpolation_of_a_plane_is_exact()
+    // `z = x + y` on the unit square: the four corners are 0, 1, 1, 2,
+    // and bilinear interpolation reproduces a plane exactly.  The
+    // centre is 1, and that is a number anybody can check.
+    match ndfloat.of_list([0.0, 1.0, 1.0, 2.0], [2, 2])
+        Ok(z)  =>
+            match ipgrid.of_grid([0.0, 1.0], [0.0, 1.0], z, IpExtrapClamp)
+                Ok(g)  =>
+                    test.assert_approx(ipgrid.bilinear_at(g, 0.5, 0.5), 1.0, 1e-12)
+                    test.assert_approx(ipgrid.bilinear_at(g, 0.0, 0.0), 0.0, 1e-12)
+                    test.assert_approx(ipgrid.bilinear_at(g, 1.0, 1.0), 2.0, 1e-12)
+                    // Outside, the policy decides — and evaluation is
+                    // total, like the 1-D case.
+                    test.assert_approx(ipgrid.bilinear_at(g, 9.0, 9.0), 2.0, 1e-12)
+                    // Nearest has the same half-way-rounds-up rule the
+                    // 1-D one does.
+                    test.assert_approx(ipgrid.nearest_at(g, 0.4, 0.4), 0.0, 1e-12)
+                    test.assert_approx(ipgrid.bicubic_at(g, 0.5, 0.5), 1.0, 1e-10)
+                    match ipgrid.resample_bilinear(g, [0.0, 0.5, 1.0], [0.0, 1.0])
+                        Ok(out) =>
+                            test.assert_eq(ndfloat.rank(out), 2)
+                            test.assert_eq(ndfloat.size(out), 6)
+                        Err(e)  => test.fail(e.message())
+                    match ipgrid.resample_bicubic(g, [0.0, 1.0], [0.0, 1.0])
+                        Ok(out) => test.assert_eq(ndfloat.size(out), 4)
+                        Err(e)  => test.fail(e.message())
+                    // The bridge back to the 1-D half: a spline along
+                    // one scan line, or an integral across a transect.
+                    match ipgrid.row_knots(g, 0)
+                        Ok(k)  => test.assert_eq(ipknots.count(k), 2)
+                        Err(e) => test.fail(e.message())
+                    match ipgrid.column_knots(g, 1)
+                        Ok(k)  => test.assert_eq(ipknots.count(k), 2)
+                        Err(e) => test.fail(e.message())
+                    match ipgrid.row_knots(g, 9)
+                        Ok(_)  => test.fail("that grid has two rows")
+                        Err(_) => test.assert_eq(true, true)
+                Err(e) => test.fail(e.message())
+        Err(e) => test.fail(e.message())
+
+// ── the B-spline basis ──────────────────────────────────────────────
+
+@test
+fn test_a_clamped_knot_vector_is_the_one_nobody_writes_correctly_by_hand()
+    // Four control points at degree 3: eight knots, four repeated at
+    // each end.  The repeat is what makes the curve start exactly at
+    // the first control point — without it, a B-spline starts somewhere
+    // inside its control polygon, which is the first surprise
+    // everybody meets.
+    match ipbspline.uniform_clamped(4, 3)
+        Ok(k)  =>
+            test.assert_eq(ipbspline.basis_count(k), 4)
+            test.assert_eq(ipbspline.degree(k), 3)
+            test.assert_eq(ipbspline.knot_vector(k).len(), 8)
+            let d = ipbspline.domain(k)
+            test.assert_approx(d.lo, 0.0, 1e-12)
+            test.assert_approx(d.hi, 1.0, 1e-12)
+        Err(e) => test.fail(e.message())
+    test.assert_eq(ipbspline.IPBSPLINE_MAX_DEGREE, 5)
+    match ipbspline.uniform_clamped(4, 9)
+        Ok(_)  => test.fail("degree 9 is above the maximum")
+        Err(e) =>
+            match e
+                IpBadOrder(_, o) => test.assert_eq(o, 9)
+                _                => test.fail("expected IpBadOrder: ${e.message()}")
+    match ipbspline.uniform_clamped(2, 3)
+        Ok(_)  => test.fail("a cubic needs four control points")
+        Err(_) => test.assert_eq(true, true)
+
+@test
+fn test_a_b_spline_knot_vector_admits_repeats_where_an_interpolation_does_not()
+    // The two validators exist because the two things genuinely differ:
+    // an interpolation knot must be distinct because every method
+    // divides by an interval width, and a B-spline knot repeats on
+    // purpose.
+    match ipbspline.knots([0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0], 3)
+        Ok(k)  => test.assert_eq(ipbspline.basis_count(k), 4)
+        Err(e) => test.fail(e.message())
+    match ipbspline.knots([0.0, 1.0, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0], 3)
+        Ok(_)  => test.fail("that vector descends")
+        Err(e) =>
+            match e
+                IpKnotsNotSorted(_, _, _) => test.assert_eq(true, true)
+                _                         => test.fail("expected IpKnotsNotSorted: ${e.message()}")
+    // More than degree + 1 in a row makes a basis function undefined
+    // rather than merely discontinuous.
+    match ipbspline.knots([0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0], 3)
+        Ok(_)  => test.fail("five repeats at degree 3 is one too many")
+        Err(e) =>
+            match e
+                IpDuplicateKnot(_, _) => test.assert_eq(true, true)
+                _                     => test.fail("expected IpDuplicateKnot: ${e.message()}")
+    match ipbspline.knots([0.0, 1.0], 3)
+        Ok(_)  => test.fail("a cubic needs eight knots")
+        Err(_) => test.assert_eq(true, true)
+
+@test
+fn test_the_basis_sums_to_one_and_only_degree_plus_one_of_it_is_non_zero()
+    // Partition of unity, which is the property that makes a B-spline
+    // an average of its control points — and the locality that makes a
+    // fitting matrix banded.
+    match ipbspline.uniform_clamped(4, 3)
+        Ok(k)  =>
+            match ipbspline.basis_at(k, 0.5)
+                Ok(b)  =>
+                    test.assert_eq(b.values.len(), 4)
+                    test.assert_eq(b.first >= 0, true)
+                    let total = b.values[0] + b.values[1] + b.values[2] + b.values[3]
+                    test.assert_approx(total, 1.0, 1e-12)
+                Err(e) => test.fail(e.message())
+            // A curve whose control points are all 1 is the constant 1,
+            // exactly, which is partition of unity said another way.
+            match ipbspline.eval_at(k, [1.0, 1.0, 1.0, 1.0], 0.5)
+                Ok(y)  => test.assert_approx(y, 1.0, 1e-12)
+                Err(e) => test.fail(e.message())
+            // Clamped: the curve starts at the first control point and
+            // ends at the last.
+            match ipbspline.eval_at(k, [0.0, 1.0, 2.0, 3.0], 0.0)
+                Ok(y)  => test.assert_approx(y, 0.0, 1e-12)
+                Err(e) => test.fail(e.message())
+            match ipbspline.eval_at(k, [0.0, 1.0, 2.0, 3.0], 1.0)
+                Ok(y)  => test.assert_approx(y, 3.0, 1e-12)
+                Err(e) => test.fail(e.message())
+            match ipbspline.eval_many(k, [1.0, 1.0, 1.0, 1.0], [0.25, 0.75])
+                Ok(ys) =>
+                    test.assert_eq(ys.len(), 2)
+                    test.assert_approx(ys[0], 1.0, 1e-12)
+                Err(e) => test.fail(e.message())
+            // A constant curve has zero derivative, exactly — a
+            // B-spline differentiates to one of lower degree rather
+            // than to a difference quotient.
+            match ipbspline.derivative_at(k, [1.0, 1.0, 1.0, 1.0], 0.5, 1)
+                Ok(d)  => test.assert_approx(d, 0.0, 1e-12)
+                Err(e) => test.fail(e.message())
+            match ipbspline.derivative_at(k, [1.0, 1.0, 1.0, 1.0], 0.5, -1)
+                Ok(_)  => test.fail("a derivative order is not negative")
+                Err(_) => test.assert_eq(true, true)
+            match ipbspline.eval_at(k, [1.0, 1.0], 0.5)
+                Ok(_)  => test.fail("four basis functions want four control points")
+                Err(_) => test.assert_eq(true, true)
+            match ipbspline.eval_at(k, [1.0, 1.0, 1.0, 1.0], 9.0)
+                Ok(_)  => test.fail("9 is outside the domain")
+                Err(_) => test.assert_eq(true, true)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_bridge_to_the_one_dimensional_half_and_the_fitting_matrix()
+    match ipbspline.uniform_clamped(4, 3)
+        Ok(k)  =>
+            // A sampling and not a conversion: the interpolating curve
+            // through those samples is not the B-spline, though it
+            // converges to it, and the name says `sample` for that
+            // reason.
+            match ipbspline.sample(k, [0.0, 1.0, 2.0, 3.0], 5)
+                Ok(knots) => test.assert_eq(ipknots.count(knots), 5)
+                Err(e)    => test.fail(e.message())
+            match ipbspline.sample(k, [0.0, 1.0, 2.0, 3.0], 1)
+                Ok(_)  => test.fail("a sampled curve needs at least two points")
+                Err(_) => test.assert_eq(true, true)
+            // The matrix a least-squares fit runs against — the one
+            // step this package deliberately does not take itself.
+            // Dense, because linalg-nv is, and the README names the
+            // banded solver as a missing row.
+            match ipbspline.collocation(k, [0.0, 0.5, 1.0])
+                Ok(a)  => test.assert_eq(a.len(), 12)
+                Err(e) => test.fail(e.message())
+            match ipbspline.collocation(k, [9.0])
+                Ok(_)  => test.fail("9 is outside the domain")
+                Err(_) => test.assert_eq(true, true)
+        Err(e) => test.fail(e.message())

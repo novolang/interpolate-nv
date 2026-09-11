@@ -1,0 +1,186 @@
+// ipgrid — interpolation over a regular two-dimensional grid.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// WHY THIS MODULE TAKES `NdFloat` WHERE THE 1-D CURVES TAKE `[Float]`.
+// A regular grid IS a shape: `z[i][j]` is the value at `(x[i], y[j])`,
+// and the two extents have to agree with the two axis lists.  Handing
+// that over as a flat list plus a row count would be this package
+// asking a caller to carry a shape beside a buffer, which is precisely
+// what `NdFloat` is.
+//
+// A 1-D curve has no such shape — a knot list is a list — so `IpKnots`
+// is two plain lists and nothing is paid for strides that are always 1.
+// The README says it at length under "Two kinds of input, and which one
+// each curve takes".
+//
+// REGULAR AND NOT SCATTERED.  This is `RegularGridInterpolator`, not
+// `griddata`.  The x axis and the y axis are each a sorted list and the
+// values are a full rectangle; a set of points at arbitrary positions
+// needs a triangulation and a natural-neighbour or radial-basis scheme,
+// which is a different subject and a bigger one.  The README names it
+// as a missing row.
+//
+// THE AXES ARE `IpKnots` WITHOUT THE VALUES, WHICH IS WHY THEY ARE
+// PLAIN LISTS HERE.  `IpKnots` pairs abscissae with ordinates, and a
+// grid's axes have no ordinates of their own — the values are the
+// matrix.  So `of_grid` validates the two axis lists itself, with the
+// same rules, and `IpGrid` is the validated result.  That is the one
+// place the package has two validators, and it is because the two
+// things being validated genuinely differ.
+
+use ndfloat
+
+// IpGrid is a validated regular grid: two strictly increasing axes and
+// a matrix of values whose extents match them.
+//
+// Built by `of_grid`, evaluated by `bilinear_at` and `bicubic_at`.  Like
+// `IpCurve`, it is a value, and like `IpCurve`, evaluation against a
+// built one is TOTAL.
+//
+// ```novo
+// use ndfloat
+// use ipgrid
+//
+// fn main() [io]
+//     match ndfloat.zeros([2, 2])
+//         Ok(z) =>
+//             match ipgrid.of_grid([0.0, 1.0], [0.0, 1.0], z, IpExtrapClamp)
+//                 Ok(g)  => println("${ipgrid.rows(g)}")   // 2
+//                 Err(e) => println(e.message())
+//         Err(e) => println(e.message())
+// ```
+pub struct IpGrid
+    // The x axis, strictly increasing, one entry per ROW of `z`.
+    xs: [Float]
+    // The y axis, strictly increasing, one entry per COLUMN of `z`.
+    ys: [Float]
+    // The values: rank 2, `xs.len()` by `ys.len()`, with `z[i][j]` at
+    // `(xs[i], ys[j])`.
+    //
+    // Row-major and indexed `[x, y]` and not `[y, x]`, which is the
+    // convention scipy's `RegularGridInterpolator` uses and the
+    // opposite of what an image library means by rows and columns.  A
+    // caller coming from an image wants to transpose, and this comment
+    // is where they find out.
+    z: NdFloat
+    // What happens outside the rectangle.
+    extrapolation: IpExtrap
+
+// The validated grid, or the reason it is not one.
+//
+// `IpNotGrid` when `z` is not rank 2, `IpGridMismatch` with all four
+// numbers when its extents do not match the axes, `IpTooFewKnots` for
+// an axis below two points, and the sortedness and finiteness refusals
+// `ipknots.of_lists` gives.
+pub fn of_grid(xs: [Float], ys: [Float], z: NdFloat, e: IpExtrap) -> Result<IpGrid, IpFault> []
+    todo("interpolate-nv.ipgrid.of_grid")
+
+// How many x values — how many rows `z` has.
+pub fn rows(g: IpGrid) -> Int []
+    todo("interpolate-nv.ipgrid.rows")
+
+// How many y values — how many columns.
+pub fn cols(g: IpGrid) -> Int []
+    todo("interpolate-nv.ipgrid.cols")
+
+// The x axis.
+pub fn xs(g: IpGrid) -> [Float] []
+    todo("interpolate-nv.ipgrid.xs")
+
+// The y axis.
+pub fn ys(g: IpGrid) -> [Float] []
+    todo("interpolate-nv.ipgrid.ys")
+
+// The values.
+pub fn values(g: IpGrid) -> NdFloat []
+    todo("interpolate-nv.ipgrid.values")
+
+// Bilinear interpolation at `(x, y)`.
+//
+// The four corners of the enclosing cell, weighted by distance: one
+// linear interpolation along x for each of the two rows, then one along
+// y between the results.  Continuous everywhere, and its derivative is
+// not — the surface has creases along every grid line.
+//
+// TOTAL, for the reason `ipcurve.at` is: the grid was validated at
+// construction.
+//
+// ```novo
+// use ndfloat
+// use ipgrid
+//
+// fn main() [io]
+//     match ndfloat.zeros([2, 2])
+//         Ok(z) =>
+//             match ipgrid.of_grid([0.0, 1.0], [0.0, 1.0], z, IpExtrapClamp)
+//                 Ok(g)  => println("${ipgrid.bilinear_at(g, 0.5, 0.5)}")   // 0
+//                 Err(e) => println(e.message())
+//         Err(e) => println(e.message())
+// ```
+pub fn bilinear_at(g: IpGrid, x: Float, y: Float) -> Float []
+    todo("interpolate-nv.ipgrid.bilinear_at")
+
+// Bicubic interpolation at `(x, y)`.
+//
+// Sixteen points — the 4 x 4 neighbourhood of the enclosing cell —
+// through a cubic in each direction.  Smooth, at four times the cost of
+// bilinear, and it is what an image resize or a contour plot wants.
+//
+// **It can overshoot**, in both directions, for the same reason a cubic
+// spline can: a sharp edge in the values produces a ring on either side
+// of it.  On an image that is the halo around a hard edge, and it is
+// inherent rather than a defect — `bilinear_at` is the one that cannot.
+//
+// Near the boundary there are not sixteen points, and this package
+// REFLECTS the grid rather than clamping it: the row before the first
+// is the second row mirrored.  Clamping would make the surface flat at
+// the edges and reflection preserves the slope, which is what scipy's
+// `map_coordinates` calls `mode="reflect"` and is the better default
+// for the resampling this is for.
+//
+// TOTAL.
+pub fn bicubic_at(g: IpGrid, x: Float, y: Float) -> Float []
+    todo("interpolate-nv.ipgrid.bicubic_at")
+
+// The nearest grid value to `(x, y)`.
+//
+// The 2-D lookup table, with the same half-way-rounds-up rule
+// `iplinear.nearest` has.  TOTAL.
+pub fn nearest_at(g: IpGrid, x: Float, y: Float) -> Float []
+    todo("interpolate-nv.ipgrid.nearest_at")
+
+// The grid resampled bilinearly onto a new regular grid.
+//
+// `new_xs` by `new_ys` values, as a rank-2 `NdFloat` in the same
+// `[x, y]` layout.  The call that puts two rasters on one grid so they
+// can be subtracted, which is the 2-D twin of `ipcurve.resample`.
+//
+// `IpBadGrid` for an empty output axis; the output axes need not be
+// sorted, because nothing downstream of a resample requires it.
+pub fn resample_bilinear(g: IpGrid, new_xs: [Float], new_ys: [Float]) -> Result<NdFloat, IpFault> []
+    todo("interpolate-nv.ipgrid.resample_bilinear")
+
+// The grid resampled bicubically onto a new regular grid.
+//
+// The same shape rules, at four times the cost and with the overshoot
+// `bicubic_at` describes.
+pub fn resample_bicubic(g: IpGrid, new_xs: [Float], new_ys: [Float]) -> Result<NdFloat, IpFault> []
+    todo("interpolate-nv.ipgrid.resample_bicubic")
+
+// The curve along one row of the grid: a 1-D interpolation in y at a
+// fixed x index.
+//
+// The bridge back to the 1-D half of the package: a caller who wants a
+// spline along one scan line, or who wants to integrate across a
+// transect, builds a curve from this and uses everything in `ipcurve`.
+//
+// `IpBadOrder` for a row index outside the grid.
+pub fn row_knots(g: IpGrid, i: Int) -> Result<IpKnots, IpFault> []
+    todo("interpolate-nv.ipgrid.row_knots")
+
+// The knots down one column: a 1-D interpolation in x at a fixed y
+// index.
+pub fn column_knots(g: IpGrid, j: Int) -> Result<IpKnots, IpFault> []
+    todo("interpolate-nv.ipgrid.column_knots")

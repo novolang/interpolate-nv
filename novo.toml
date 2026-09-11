@@ -1,0 +1,49 @@
+[package]
+name        = "interpolate-nv"
+version     = "0.0.1"
+description = "Interpolation over sorted knots, as a value built once and evaluated many times: linear and nearest, the cubic spline in its three boundary conditions, Akima and PCHIP where a spline would overshoot, with an extrapolation policy the caller names.  Derivatives, antiderivatives and definite integrals of a spline, resampling onto a new grid, bilinear and bicubic over a regular 2-D grid of ndarray-nv values, and the B-spline basis underneath.  Interface only — every body is a todo()."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`: interpolation is arithmetic over numbers the caller already
+# holds.  Nothing is read, nothing is written, no clock is consulted;
+# the knots arrive as a list and the answers go back as one.
+#
+# The package makes NO `@tier(embedded)` claim, and there is no
+# `tests/embedded_probe.nv`, so the audit's `core-embedded` row passes
+# and says so.  A curve owns its knots and its coefficients as LISTS,
+# and a list literal is a heap allocation the tier refuses (SPEC
+# § 14.4).  The README names what a fixed-knot device form would have
+# to be, as a row that does not exist yet.
+layer       = "core"
+
+category    = "science"
+
+tags = ["interpolation", "spline", "scipy", "pchip", "akima", "bspline", "resample", "science"]
+repository  = "https://github.com/novolang/interpolate-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.8.9"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "Curves built once from sorted knots, and evaluated many times"
+
+[dependencies]
+# ndarray-nv carries the 2-D grid and nothing else.  A regular grid IS
+# a shape — `z[i][j]` at `(x[i], y[j])` — so a caller handing over a
+# flat list with two dimension arguments beside it would be writing the
+# stride arithmetic this package exists to have written once.  The 1-D
+# curves take plain `[Float]` knots, and the README section "Two kinds
+# of input, and which one each curve takes" says why that is not an
+# inconsistency.
+#
+# `core`, so the layer rule holds.
+ndarray-nv = "^0.0.1"

@@ -1,0 +1,121 @@
+// ipfault — every way a curve can refuse to be built or read.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// ALMOST EVERYTHING HERE IS ABOUT CONSTRUCTION, AND THAT IS THE WHOLE
+// DESIGN.  A curve is built once and evaluated thousands of times.  So
+// every precondition an evaluation could have — the knots are sorted,
+// they are distinct, there are enough of them for the method, the
+// values list is as long as the knots list — is checked ONCE, at
+// construction, and the evaluators that take a built curve are TOTAL:
+// `ipcurve.at` returns a `Float` and not a `Result<Float, IpFault>`,
+// and that is the load-bearing decision this package makes.
+//
+// `IpOutOfDomain` is the one refusal that can happen at evaluation, and
+// it happens only under `IpExtrapError` — a policy the caller chose.
+// Every other policy answers a number.  So an inner loop that has
+// picked `IpExtrapClamp` or `IpExtrapLinear` has no error path at all,
+// which is what makes a resample of a million points a loop over
+// floats rather than a loop over `Result`s.
+//
+// `is_construction_fault` is the predicate: true for everything a
+// builder can say and false for `IpOutOfDomain`.
+
+// IpFault is why a curve would not be built, or would not answer.
+pub enum IpFault
+    // The knots are not strictly increasing.  `at` is the index of the
+    // first offending knot and `previous` and `current` are the two
+    // values, so a caller with ten thousand knots from a file knows
+    // which line to look at.
+    //
+    // STRICTLY increasing and not merely non-decreasing: two equal
+    // knots make a zero-width interval, and every method here divides
+    // by an interval width.
+    IpKnotsNotSorted(at: Int, previous: Float, current: Float)
+    // Two knots are equal.  Named separately from the unsorted case
+    // because the causes are different — an unsorted list is usually
+    // data that was never sorted, and a duplicate is usually a value
+    // measured twice — and the fixes are different too.
+    IpDuplicateKnot(at: Int, value: Float)
+    // The knots and the values are different lengths.  `knots` and
+    // `values` are the two counts.
+    IpLengthMismatch(knots: Int, values: Int)
+    // Fewer knots than the method needs.  `need` is the minimum and
+    // `got` is what arrived: linear and nearest need 2, Akima needs 5,
+    // PCHIP and the cubic splines need 3 (4 for not-a-knot), a B-spline
+    // of degree k needs k + 1.
+    //
+    // The method's own name is in `method`, because a caller who passed
+    // four points to three constructors wants to know which one refused.
+    IpTooFewKnots(method: Str, need: Int, got: Int)
+    // A knot or a value that is not a finite number.  `at` is the
+    // index.  A NaN in a knot list would make every comparison in the
+    // binary search false, and the curve would be silently wrong rather
+    // than obviously so.
+    IpNotFinite(what: Str, at: Int)
+    // An evaluation outside `[knots[0], knots[n-1]]` under
+    // `IpExtrapError`.  `x` is the point asked for and `lo` and `hi`
+    // are the domain.
+    //
+    // The ONE refusal that is not about construction — and it happens
+    // only under a policy the caller chose.
+    IpOutOfDomain(x: Float, lo: Float, hi: Float)
+    // A B-spline degree outside 0 to 5, or a negative derivative order.
+    IpBadOrder(what: Str, order: Int)
+    // A 2-D grid whose `z` is not rank 2, or whose extents do not match
+    // the two axis lists.  `want_rows`, `want_cols` are the axes' and
+    // `got_rows`, `got_cols` the array's.
+    IpGridMismatch(want_rows: Int, want_cols: Int, got_rows: Int, got_cols: Int)
+    // A 2-D array that is not rank 2 where a grid was required.
+    IpNotGrid(rank: Int)
+    // A resample grid with a non-positive count, or one whose ends are
+    // in the wrong order.
+    IpBadGrid(count: Int)
+
+// message renders the refusal as one line of prose, with the numbers in
+// it.
+//
+// `Result<_, IpFault>` requires this impl: SPEC § 3.4 admits a `Result`
+// error type only if it implements `Error`.
+impl Error for IpFault
+    // Answer the one-line report: what was wrong, and where in the
+    // caller's own list.
+    //
+    // ```novo
+    // use ipfault
+    //
+    // fn main() [io]
+    //     let e = IpDuplicateKnot(at: 4, value: 1.5)
+    //     println(e.message())
+    //     // interpolate: knot 4 repeats the value 1.5
+    // ```
+    fn message(self) -> Str
+        todo("interpolate-nv.ipfault.IpFault.message")
+
+// Whether this refusal came from BUILDING a curve rather than from
+// evaluating one.
+//
+// True for everything except `IpOutOfDomain`.  The distinction is the
+// package's shape: construction is where the checking lives, and an
+// evaluator that meets a refusal at all met the one the caller asked
+// for by choosing `IpExtrapError`.
+//
+// ```novo
+// use ipfault
+//
+// fn main() [io]
+//     let a = ipfault.is_construction_fault(IpDuplicateKnot(at: 1, value: 0.0))
+//     let b = ipfault.is_construction_fault(IpOutOfDomain(x: 9.0, lo: 0.0, hi: 1.0))
+//     println("${a} ${b}")   // true false
+// ```
+pub fn is_construction_fault(e: IpFault) -> Bool []
+    todo("interpolate-nv.ipfault.is_construction_fault")
+
+// The index in the caller's own knot list that a refusal points at, and
+// `None` for the refusals that point at no single knot.
+//
+// An optional rather than a sentinel, because 0 is a real index: a
+// first knot that is a NaN is `IpNotFinite(at: 0)`.
+pub fn knot_index(e: IpFault) -> ?Int []
+    todo("interpolate-nv.ipfault.knot_index")

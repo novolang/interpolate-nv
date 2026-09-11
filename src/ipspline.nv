@@ -1,0 +1,211 @@
+// ipspline — the cubic methods, and what each of them is for.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// FIVE CONSTRUCTORS, AND THE CHOICE BETWEEN THEM IS THE ONLY THING A
+// CALLER HAS TO UNDERSTAND ABOUT THIS PACKAGE.  All five answer an
+// `IpCurve`; they differ in how the slope at each knot is chosen, and
+// that choice is what decides whether the curve wiggles.
+//
+// THE THREE CLASSICAL SPLINES solve one tridiagonal system for all the
+// slopes at once, so that the second derivative is continuous
+// everywhere.  That is what "smooth" means and it is also what makes
+// them GLOBAL: moving one knot changes the curve everywhere, and a
+// single outlier makes the whole curve ring.  They differ only in the
+// two extra equations the system needs at the ends:
+//
+//   natural     second derivative zero at both ends.  The curve is
+//               straight as it leaves the data, which is the honest
+//               thing for data that has no known slope at its edges.
+//   clamped     first derivative given at both ends.  For data whose
+//               end slopes are known from physics rather than measured
+//               — a trajectory that starts at rest.
+//   not-a-knot  third derivative continuous across the SECOND and
+//               second-to-last knots, so the first two intervals share
+//               one cubic and so do the last two.  scipy's
+//               `CubicSpline` default, and the best choice when nothing
+//               is known about the ends: it invents no condition and
+//               reproduces a true cubic exactly.
+//
+// THE TWO LOCAL METHODS choose each slope from a few nearby points, so
+// there is no system to solve, moving one knot changes the curve only
+// nearby, and an outlier stays where it is.  The price is that the
+// second derivative is NOT continuous.
+//
+//   Akima   the slope at a knot is a weighted blend of the two
+//           neighbouring secants, weighted so that a knot next to a
+//           flat run gets a flat slope.  It is the method for data with
+//           a sudden change in it, and it needs five points because the
+//           formula looks two knots each way.
+//   PCHIP   the slopes are chosen so that the interpolant is MONOTONE
+//           on every interval where the data is.  It cannot overshoot:
+//           if the data never goes above 1, neither does the curve.
+//
+// WHICH TO PICK, in one line each: **not-a-knot for smooth data, PCHIP
+// when overshoot would be wrong, Akima when the data has a corner in
+// it.**  The README has the longer version with the case that makes the
+// difference visible.
+
+// The cubic spline with natural end conditions: second derivative zero
+// at both ends.
+//
+// `IpTooFewKnots` below three points — two points have no second
+// derivative to set.
+//
+// ```novo
+// use ipknots
+// use ipspline
+// use ipcurve
+//
+// fn main() [io]
+//     match ipknots.of_lists([0.0, 1.0, 2.0], [0.0, 1.0, 0.0])
+//         Ok(k) =>
+//             match ipspline.natural(k, IpExtrapPolynomial)
+//                 Ok(c)  => println("${ipcurve.method_name(c)}")   // natural
+//                 Err(e) => println(e.message())
+//         Err(e) => println(e.message())
+// ```
+pub fn natural(k: IpKnots, e: IpExtrap) -> Result<IpCurve, IpFault> []
+    todo("interpolate-nv.ipspline.natural")
+
+// The cubic spline with clamped end conditions: the first derivative is
+// `start_slope` at the first knot and `end_slope` at the last.
+//
+// For data whose end slopes are known rather than measured.
+// `IpTooFewKnots` below three points, `IpNotFinite` for a slope that is
+// a NaN or an infinity — which would otherwise propagate silently
+// through the tridiagonal solve and make the whole curve a NaN.
+pub fn clamped(k: IpKnots, start_slope: Float, end_slope: Float,
+               e: IpExtrap) -> Result<IpCurve, IpFault> []
+    todo("interpolate-nv.ipspline.clamped")
+
+// The cubic spline with not-a-knot end conditions: the third derivative
+// is continuous across the second and second-to-last knots.
+//
+// scipy's `CubicSpline` default, and the right choice when nothing is
+// known about the ends: it invents no condition, and it reproduces a
+// true cubic exactly, which neither of the other two does.
+//
+// `IpTooFewKnots` below FOUR points — the condition is about the second
+// and second-to-last knots, and with three points those are the same
+// knot.
+pub fn not_a_knot(k: IpKnots, e: IpExtrap) -> Result<IpCurve, IpFault> []
+    todo("interpolate-nv.ipspline.not_a_knot")
+
+// Akima's interpolation: local slopes from a weighted blend of the
+// neighbouring secants.
+//
+// The method for data with a sudden change in it.  A classical spline
+// meeting a step rings for several intervals on both sides of it;
+// Akima's weighting gives a knot next to a flat run a flat slope, so
+// the ringing does not happen.  The price is that the second derivative
+// is not continuous.
+//
+// `IpTooFewKnots` below FIVE points: the formula at a knot looks two
+// knots in each direction.  scipy's `Akima1DInterpolator` has the same
+// minimum.
+pub fn akima(k: IpKnots, e: IpExtrap) -> Result<IpCurve, IpFault> []
+    todo("interpolate-nv.ipspline.akima")
+
+// PCHIP: piecewise cubic Hermite with slopes chosen to preserve
+// monotonicity.
+//
+// The method for data where overshoot would be WRONG — a concentration,
+// a probability, a count, a cumulative distribution.  A classical
+// spline through `[0, 0, 0, 1, 1, 1]` dips below zero before it rises
+// and overshoots one after; PCHIP does not, because it picks each slope
+// so that the interval's cubic is monotone whenever the data is.
+//
+// The guarantee is exact and is worth stating precisely: **on any
+// interval where the data is monotone, the interpolant is monotone, and
+// the interpolant never leaves the range of the data.**  That is the
+// property, and it is what the test suite asserts.
+//
+// `IpTooFewKnots` below three points.
+//
+// ```novo
+// use ipknots
+// use ipspline
+// use ipcurve
+//
+// fn main() [io]
+//     match ipknots.of_lists([0.0, 1.0, 2.0, 3.0], [0.0, 0.0, 1.0, 1.0])
+//         Ok(k) =>
+//             match ipspline.pchip(k, IpExtrapClamp)
+//                 Ok(c)  => println("${ipcurve.at(c, 0.5) >= 0.0}")   // true
+//                 Err(e) => println(e.message())
+//         Err(e) => println(e.message())
+// ```
+pub fn pchip(k: IpKnots, e: IpExtrap) -> Result<IpCurve, IpFault> []
+    todo("interpolate-nv.ipspline.pchip")
+
+// The cubic Hermite curve through the knots with slopes the caller
+// supplies.
+//
+// The primitive all five of the above are written on: given a value and
+// a slope at each knot, the cubic on each interval is determined.
+// Published because a caller who computed slopes some other way — from
+// a model, from a measurement, from a previous curve's derivative —
+// should not have to reimplement the Hermite basis.
+//
+// `IpLengthMismatch` when there is not one slope per knot,
+// `IpNotFinite` for a slope that is not a number.
+pub fn hermite(k: IpKnots, slopes: [Float], e: IpExtrap) -> Result<IpCurve, IpFault> []
+    todo("interpolate-nv.ipspline.hermite")
+
+// The slopes PCHIP would choose at each knot, without building a curve.
+//
+// Published for the caller who wants the monotone slopes and then does
+// something else with them, and because it is the one part of PCHIP a
+// reader is likely to want to check against Fritsch and Carlson's
+// paper directly.
+//
+// `IpTooFewKnots` below three points.
+pub fn pchip_slopes(k: IpKnots) -> Result<[Float], IpFault> []
+    todo("interpolate-nv.ipspline.pchip_slopes")
+
+// The slopes Akima's formula would choose at each knot.
+//
+// The same reasoning as `pchip_slopes`.  `IpTooFewKnots` below five.
+pub fn akima_slopes(k: IpKnots) -> Result<[Float], IpFault> []
+    todo("interpolate-nv.ipspline.akima_slopes")
+
+// Whether a curve is monotone on the whole of its domain, to within a
+// tolerance.
+//
+// The property `pchip` promises, made checkable.  It is here rather
+// than only in the test suite because a caller who built a natural
+// spline through data they believed was monotone wants to be able to
+// find out that it is not — and because the answer to "did my
+// interpolation overshoot" should not require sampling a thousand
+// points and looking at a plot.
+//
+// Checked exactly, from the coefficients: a cubic is monotone on an
+// interval when its derivative — a quadratic — does not change sign
+// there, which is a discriminant and two roots rather than a sample.
+pub fn is_monotone(c: IpCurve, tolerance: Float) -> Bool []
+    todo("interpolate-nv.ipspline.is_monotone")
+
+// The curve's smallest and largest values over its whole domain, as a
+// pair.
+//
+// Exact, from the coefficients: a piecewise cubic's extrema are at the
+// knots and at the roots of each interval's quadratic derivative, so
+// this is arithmetic rather than sampling.
+//
+// The call that answers "did my interpolation leave the range of my
+// data" in one line, which is the question `pchip` exists to make
+// unnecessary and the one a natural spline invites.
+pub fn range_of(c: IpCurve) -> IpRange []
+    todo("interpolate-nv.ipspline.range_of")
+
+// IpRange is a curve's smallest and largest value.
+//
+// A struct rather than a tuple because `r.0` and `r.1` at a call site
+// is how a minimum becomes a maximum.
+pub struct IpRange
+    // The smallest value the curve takes on its domain.
+    lo: Float
+    // The largest.
+    hi: Float

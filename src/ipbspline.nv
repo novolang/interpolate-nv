@@ -1,0 +1,234 @@
+// ipbspline — the B-spline basis, which is what the rest of this
+// package is a special case of.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// WHY THIS IS HERE WHEN `ipspline` ALREADY INTERPOLATES.  Everything in
+// `ipspline` answers a curve through the knots — the curve passes
+// through every data point.  A B-spline is the other half of the
+// subject: a basis in which a curve is a weighted sum of local bump
+// functions, and the weights are the caller's to choose.  That is what
+// a FIT is (least squares over the basis, which does not pass through
+// the points), what a SMOOTHER is, and what a designed curve in a
+// drawing program is.
+//
+// This package publishes the BASIS and the evaluation, and stops there.
+// Fitting is `lstsq` over a matrix whose columns are these basis
+// functions, and it lives in linalg-nv or in a caller; smoothing needs
+// a penalty parameter and a cross-validation rule, which is a different
+// subject.  The README names the fit as a missing row.
+//
+// THE KNOT VECTOR IS NOT THE DATA'S ABSCISSAE, and that is the thing
+// everybody gets wrong once.  For an interpolating spline the knots are
+// where the data is.  For a B-spline of degree `k` the knot vector is
+// longer — `n + k + 1` entries for `n` basis functions — and it is
+// allowed to REPEAT a value, which is how a curve is made to start
+// exactly at its first control point.  `IpBSplineKnots` is that vector,
+// validated for the rules it actually has: non-DEcreasing (not
+// strictly increasing — repeats are the point), enough entries for the
+// degree, and no more than `k + 1` repeats in a row.
+//
+// COX-DE BOOR, EVALUATED BY DE BOOR'S ALGORITHM.  The basis functions
+// have a recursive definition, and evaluating that definition directly
+// is exponential; de Boor's algorithm is the linear one, and it is what
+// `eval_at` does.  `basis_at` answers the individual basis values for a
+// caller building a fitting matrix, and it is the expensive one.
+
+// The highest degree this package supports: 5.
+//
+// Degree 3 is the cubic everybody means; 0 is piecewise constant, 1 is
+// piecewise linear.  Above 5 the basis functions get wide enough that a
+// change in one control point is felt six intervals away, which is a
+// property nobody wants, and the numerical conditioning gets worse.
+// scipy admits up to 5 for the same reasons.
+pub const IPBSPLINE_MAX_DEGREE = 5
+
+// IpBSplineKnots is a validated B-spline knot vector.
+//
+// Non-decreasing, with repeats admitted up to `degree + 1` in a row,
+// and long enough for the degree it was built for.
+//
+// ```novo
+// use ipbspline
+//
+// fn main() [io]
+//     match ipbspline.knots([0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0], 3)
+//         Ok(k)  => println("${ipbspline.basis_count(k)}")   // 4
+//         Err(e) => println(e.message())
+// ```
+pub struct IpBSplineKnots
+    // The knot vector, non-decreasing.
+    t: [Float]
+    // The degree the vector was validated for.
+    degree: Int
+
+// The validated knot vector, or the reason it is not one.
+//
+// `IpBadOrder` for a degree outside `0 ..= IPBSPLINE_MAX_DEGREE`,
+// `IpTooFewKnots` for a vector shorter than `2 * (degree + 1)`,
+// `IpKnotsNotSorted` with the index for a descent, `IpNotFinite` for a
+// NaN, and `IpDuplicateKnot` for more than `degree + 1` equal values in
+// a row — which would make a basis function undefined rather than
+// merely discontinuous.
+//
+// Note that a repeat is NOT refused, unlike `ipknots.of_lists`.  The
+// two validators exist because the two things genuinely differ: an
+// interpolation knot must be distinct because every method divides by
+// an interval width, and a B-spline knot repeats on purpose.
+pub fn knots(t: [Float], degree: Int) -> Result<IpBSplineKnots, IpFault> []
+    todo("interpolate-nv.ipbspline.knots")
+
+// The CLAMPED uniform knot vector for `n` control points of degree `k`:
+// `k + 1` repeats of 0, then evenly spaced interior knots, then `k + 1`
+// repeats of 1.
+//
+// The vector almost every caller wants and almost nobody writes
+// correctly by hand.  "Clamped" is the repeat at each end, and what it
+// buys is that the curve starts exactly at the first control point and
+// ends exactly at the last — without it, a B-spline starts somewhere
+// inside its control polygon, which is the first surprise everybody
+// meets.
+//
+// `IpBadOrder` for a degree outside the range, `IpTooFewKnots` when `n`
+// is below `degree + 1`.
+pub fn uniform_clamped(control_count: Int, degree: Int) -> Result<IpBSplineKnots, IpFault> []
+    todo("interpolate-nv.ipbspline.uniform_clamped")
+
+// How many basis functions this knot vector has:
+// `t.len() - degree - 1`.
+//
+// Also how many control points a curve over it needs, which is the
+// number a caller sizing a fitting matrix wants.
+pub fn basis_count(k: IpBSplineKnots) -> Int []
+    todo("interpolate-nv.ipbspline.basis_count")
+
+// The degree.
+pub fn degree(k: IpBSplineKnots) -> Int []
+    todo("interpolate-nv.ipbspline.degree")
+
+// The knot vector.
+pub fn knot_vector(k: IpBSplineKnots) -> [Float] []
+    todo("interpolate-nv.ipbspline.knot_vector")
+
+// The domain over which the basis sums to one: `[t[degree],
+// t[len - degree - 1]]`, as a pair.
+//
+// Outside it the basis functions do not partition unity and the curve
+// is not defined — which is a fact about B-splines rather than a
+// policy, so it is a domain rather than an extrapolation choice.
+pub fn domain(k: IpBSplineKnots) -> IpSpan []
+    todo("interpolate-nv.ipbspline.domain")
+
+// IpSpan is a closed interval.
+//
+// A struct rather than a tuple for the reason `IpRange` is one.
+pub struct IpSpan
+    // The low end, inclusive.
+    lo: Float
+    // The high end, inclusive.
+    hi: Float
+
+// The `degree + 1` non-zero basis function values at `x`, and the index
+// of the first of them.
+//
+// A B-spline basis function is non-zero over only `degree + 1`
+// intervals, so at any `x` exactly `degree + 1` of them are non-zero —
+// which is what makes a B-spline local and what makes a fitting matrix
+// banded.  Answering only those, with their starting index, is the
+// difference between a fitting matrix that is built in `O(n k)` and one
+// built in `O(n²)`.
+//
+// Cox-de Boor, evaluated iteratively.  `IpOutOfDomain` for an `x`
+// outside `domain`.
+//
+// ```novo
+// use ipbspline
+//
+// fn main() [io]
+//     match ipbspline.uniform_clamped(4, 3)
+//         Ok(k) =>
+//             match ipbspline.basis_at(k, 0.5)
+//                 Ok(b)  => println("${b.values.len()}")   // 4
+//                 Err(e) => println(e.message())
+//         Err(e) => println(e.message())
+// ```
+pub fn basis_at(k: IpBSplineKnots, x: Float) -> Result<IpBasis, IpFault> []
+    todo("interpolate-nv.ipbspline.basis_at")
+
+// IpBasis is the non-zero basis values at a point and where they start.
+//
+// `values[j]` is basis function `first + j` evaluated at the point, and
+// every other basis function is zero there.
+pub struct IpBasis
+    // The index of the first non-zero basis function.
+    first: Int
+    // Its value and the `degree` values after it — `degree + 1` in all,
+    // summing to 1.
+    values: [Float]
+
+// The value at `x` of the curve with these control points over this
+// knot vector.
+//
+// De Boor's algorithm: linear in the degree, where evaluating the
+// recursive definition directly is exponential.  This is the call that
+// draws a designed curve.
+//
+// `IpLengthMismatch` when the control points are not `basis_count`
+// long, `IpOutOfDomain` for an `x` outside `domain`.
+pub fn eval_at(k: IpBSplineKnots, control: [Float], x: Float) -> Result<Float, IpFault> []
+    todo("interpolate-nv.ipbspline.eval_at")
+
+// The curve's values at many points, in one call.
+//
+// One validation and one pass, which is what a plot of a designed curve
+// needs.
+pub fn eval_many(k: IpBSplineKnots, control: [Float], xs: [Float]) -> Result<[Float], IpFault> []
+    todo("interpolate-nv.ipbspline.eval_many")
+
+// The `d`th derivative of the curve at `x`.
+//
+// A B-spline of degree `k` differentiates to one of degree `k - 1` over
+// the same interior knots, so this is exact rather than a difference
+// quotient.  `d` above the degree answers 0.
+//
+// `IpBadOrder` for a negative `d`.
+pub fn derivative_at(k: IpBSplineKnots, control: [Float], x: Float,
+                     d: Int) -> Result<Float, IpFault> []
+    todo("interpolate-nv.ipbspline.derivative_at")
+
+// The curve sampled onto `count` evenly spaced points across its
+// domain, as knots ready for the 1-D half of this package.
+//
+// The bridge: a designed or fitted B-spline becomes an `IpKnots`, and
+// then `ipcurve`'s integral, derivative and resample all apply.  It is
+// a SAMPLING and not a conversion — the interpolating curve through
+// those samples is not the B-spline, though it converges to it — and
+// the name says `sample` for that reason.
+//
+// `IpBadGrid` for a count below two.
+pub fn sample(k: IpBSplineKnots, control: [Float], count: Int) -> Result<IpKnots, IpFault> []
+    todo("interpolate-nv.ipbspline.sample")
+
+// The collocation matrix: `basis_at` evaluated at every one of the
+// caller's points, as a dense `rows x basis_count` list in row-major
+// order.
+//
+// The matrix a least-squares FIT is run against — `lstsq(A, y)` over
+// this `A` answers the control points that best fit the data, which is
+// the one step this package deliberately does not take itself.  It is
+// published as a list rather than an `NdFloat` so that this module
+// needs nothing from ndarray-nv; a caller passes it to
+// `ndfloat.of_list` with the two dimensions, which `rows` and
+// `basis_count` both give them.
+//
+// **Dense on purpose, and it is the wasteful form.**  Only `degree + 1`
+// entries per row are non-zero, so a banded representation would be
+// several times smaller — but linalg-nv is dense, so a dense matrix is
+// what its `lstsq` takes, and building the banded form here would leave
+// the caller converting it back.  The README names the banded solver as
+// a missing row.
+//
+// `IpOutOfDomain` for a point outside the domain.
+pub fn collocation(k: IpBSplineKnots, at: [Float]) -> Result<[Float], IpFault> []
+    todo("interpolate-nv.ipbspline.collocation")

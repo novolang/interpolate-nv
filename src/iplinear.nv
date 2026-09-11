@@ -1,0 +1,97 @@
+// iplinear — the two methods that do not smooth anything.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// WHY THESE ARE NOT IN `ipspline`.  They are the two methods a caller
+// reaches for when they do NOT want a curve: piecewise linear is what a
+// plot's line segments are and what `numpy.interp` does, and nearest is
+// what a lookup table does.  Neither has a boundary condition, neither
+// can overshoot, and neither needs more than two points.  Putting them
+// beside the cubic methods would have made a reader wonder which
+// boundary condition applies to them.
+//
+// THEY ANSWER AN `IpCurve` ALL THE SAME, because everything downstream —
+// `at`, `at_many`, `derivative`, `integral`, `resample` — is written
+// once over that type.  A piecewise linear curve is a cubic whose
+// quadratic and cubic coefficients are zero, and a nearest one is a
+// cubic whose top three are.  The representation costs two multiplies
+// per evaluation that a specialised form would not do, and buys every
+// downstream function for free.
+//
+// NEITHER CONSTRUCTOR IS FALLIBLE, and that is the point of `IpKnots`:
+// the validation happened there, two points is the minimum `IpKnots`
+// already enforces, and there is nothing left for these to refuse.
+
+// The piecewise linear curve through the knots.
+//
+// `numpy.interp`, with the extrapolation policy named rather than
+// defaulted.  The straight line between each pair of knots, continuous
+// everywhere and differentiable nowhere in particular.
+//
+// Total: `IpKnots` guarantees at least two points and everything else
+// this needs.
+//
+// ```novo
+// use ipknots
+// use iplinear
+// use ipcurve
+//
+// fn main() [io]
+//     match ipknots.of_lists([0.0, 1.0, 2.0], [0.0, 1.0, 0.0])
+//         Ok(k) =>
+//             let c = iplinear.of_knots(k, IpExtrapClamp)
+//             println("${ipcurve.at(c, 0.5)}")   // 0.5
+//         Err(e) => println(e.message())
+// ```
+pub fn of_knots(k: IpKnots, e: IpExtrap) -> IpCurve []
+    todo("interpolate-nv.iplinear.of_knots")
+
+// The piecewise constant curve: the value of the NEARER knot.
+//
+// A lookup table with a tie rule.  At the exact midpoint of an interval
+// it answers the RIGHT knot's value — scipy's `kind="nearest"` rounds
+// half up in the same way, and a rule stated is worth more here than a
+// rule that is right, because a caller sampling a step function on a
+// grid that lands on midpoints will see every one of them.
+//
+// `kind="nearest-up"` and `kind="previous"` and `kind="next"` are
+// scipy's three other step variants and are NOT here; the README names
+// them.
+pub fn nearest(k: IpKnots, e: IpExtrap) -> IpCurve []
+    todo("interpolate-nv.iplinear.nearest")
+
+// The linear interpolation of one point, with no curve built.
+//
+// The one-shot form, for a caller who has two lists and one `x` and is
+// not coming back — `numpy.interp` with a scalar argument.  It does the
+// binary search and the arithmetic and keeps nothing.
+//
+// Fallible because it validates the knots on the way through: this is
+// the one path into the package that does not start with `IpKnots`, so
+// the check happens here instead.
+//
+// **One shot.**  A caller with more than one `x` wants `of_knots` once
+// and `ipcurve.at_many`, which is a validated construction and then a
+// single pass.
+//
+// ```novo
+// use iplinear
+//
+// fn main() [io]
+//     match iplinear.interp([0.0, 2.0], [0.0, 4.0], 1.0, IpExtrapClamp)
+//         Ok(y)  => println("${y}")   // 2
+//         Err(e) => println(e.message())
+// ```
+pub fn interp(xs: [Float], ys: [Float], x: Float, e: IpExtrap) -> Result<Float, IpFault> []
+    todo("interpolate-nv.iplinear.interp")
+
+// The linear interpolation of many points, with no curve kept.
+//
+// The other one-shot form, and the direct translation of
+// `numpy.interp(new_xs, xs, ys)`.  It validates once and then makes one
+// pass, so it is not the trap `interp` in a loop would be — it is here
+// so that a port from Python is a rename rather than a restructure.
+pub fn interp_many(xs: [Float], ys: [Float], at: [Float],
+                   e: IpExtrap) -> Result<[Float], IpFault> []
+    todo("interpolate-nv.iplinear.interp_many")

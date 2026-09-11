@@ -1,0 +1,167 @@
+// ipknots — the validated knot list, which is the one fallible thing in
+// this package.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// THE LOAD-BEARING DECISION, AND IT IS HERE RATHER THAN IN A CURVE
+// MODULE.  Every interpolation method in this package needs the same
+// three things of its input: the abscissae are strictly increasing,
+// every number is finite, and the values list is as long as the knots
+// list.  Every method would otherwise check them, which is five copies
+// of one rule — or, worse, five slightly different copies.
+//
+// So the check is a TYPE.  `IpKnots` is a pair of lists that has passed
+// it, `of_lists` is the only way to make one, and every curve
+// constructor takes an `IpKnots` and cannot meet an unsorted knot.
+// What that buys is the property this whole package is shaped around:
+// **evaluation is total.**  `ipcurve.at` answers a `Float`, not a
+// `Result<Float, IpFault>`, because by the time a curve exists there is
+// nothing left for an evaluation to refuse.
+//
+// A validated-input type is a small idea and it is worth spelling out
+// because the alternative looks so reasonable: a `spline(xs, ys)` that
+// returns a `Result` looks like it has the same safety, and it does —
+// for one method.  Five methods means five validations, a resample
+// means a sixth, and the moment one of them is slightly different the
+// package has two ideas of what a knot list is.
+//
+// WHY THE VALUES ARE IN HERE TOO.  A knot list on its own is half the
+// invariant: the length check is between the two lists, so a type that
+// carried only the abscissae would leave every constructor checking
+// the other half.  `IpKnots` is the whole input, validated.
+//
+// SORTED AND NOT SORTING.  `of_lists` REFUSES an unsorted list rather
+// than sorting it.  Sorting would mean permuting the values to match,
+// which is a data transformation a caller should have asked for — and
+// a caller whose x values arrived unsorted usually has a bug rather
+// than an ordering preference.  `sorted_by_x` is the explicit sort,
+// named so that reaching for it is a decision.
+
+// IpKnots is a knot list and its values, validated: strictly
+// increasing, all finite, equal lengths, at least two points.
+//
+// The fields are public because a curve's own doc comment talks about
+// them and a reader should be able to see what was kept.
+//
+// ```novo
+// use ipknots
+//
+// fn main() [io]
+//     match ipknots.of_lists([0.0, 1.0, 2.0], [0.0, 1.0, 4.0])
+//         Ok(k)  => println("${ipknots.count(k)}")   // 3
+//         Err(e) => println(e.message())
+// ```
+pub struct IpKnots
+    // The abscissae, strictly increasing.
+    xs: [Float]
+    // The ordinates, one per abscissa.
+    ys: [Float]
+
+// The validated knots, or the reason they are not.
+//
+// `IpLengthMismatch` when the lists differ, `IpTooFewKnots` below two
+// points, `IpNotFinite` with the index for a NaN or an infinity,
+// `IpDuplicateKnot` for two equal abscissae, and `IpKnotsNotSorted`
+// with the index and both values for a descent.
+//
+// This is the one fallible call in the package's construction path, and
+// every curve constructor takes what it answers.
+//
+// ```novo
+// use ipknots
+//
+// fn main() [io]
+//     match ipknots.of_lists([1.0, 0.0], [0.0, 1.0])
+//         Ok(_)  => println("that list is not increasing")
+//         Err(e) => println(e.message())
+// ```
+pub fn of_lists(xs: [Float], ys: [Float]) -> Result<IpKnots, IpFault> []
+    todo("interpolate-nv.ipknots.of_lists")
+
+// The validated knots from a pair of lists that may be in any order,
+// sorted by `x` with the values permuted to match.
+//
+// The explicit sort, so that reaching for it is a decision rather than
+// something `of_lists` did quietly.  It still refuses duplicates,
+// non-finite numbers and a list shorter than two — sorting does not
+// make those go away.
+pub fn sorted_by_x(xs: [Float], ys: [Float]) -> Result<IpKnots, IpFault> []
+    todo("interpolate-nv.ipknots.sorted_by_x")
+
+// How many knots there are.
+pub fn count(k: IpKnots) -> Int []
+    todo("interpolate-nv.ipknots.count")
+
+// The abscissae.
+pub fn xs(k: IpKnots) -> [Float] []
+    todo("interpolate-nv.ipknots.xs")
+
+// The ordinates.
+pub fn ys(k: IpKnots) -> [Float] []
+    todo("interpolate-nv.ipknots.ys")
+
+// The first abscissa — the low end of every curve's domain.
+pub fn lo(k: IpKnots) -> Float []
+    todo("interpolate-nv.ipknots.lo")
+
+// The last abscissa — the high end.
+pub fn hi(k: IpKnots) -> Float []
+    todo("interpolate-nv.ipknots.hi")
+
+// The index `i` such that `xs[i] <= x < xs[i+1]`, by binary search.
+//
+// `0` for an `x` at or below the first knot and `count - 2` for one at
+// or above the last, so the answer is always a usable interval index
+// and an evaluator needs no bound test of its own.  That clamping is
+// what lets every extrapolation policy be written as arithmetic over
+// the returned interval rather than as a special case before it.
+//
+// Published because a caller evaluating a curve and a derivative at the
+// same point can find the interval once, and because a test can assert
+// the search directly.
+//
+// ```novo
+// use ipknots
+//
+// fn main() [io]
+//     match ipknots.of_lists([0.0, 1.0, 2.0], [0.0, 1.0, 4.0])
+//         Ok(k)  => println("${ipknots.interval(k, 1.5)}")   // 1
+//         Err(e) => println(e.message())
+// ```
+pub fn interval(k: IpKnots, x: Float) -> Int []
+    todo("interpolate-nv.ipknots.interval")
+
+// Whether `x` is inside `[lo, hi]`, endpoints included.
+//
+// The question `IpExtrapError` asks, published so a caller can ask it
+// themselves and pick a policy per point rather than per curve.
+pub fn contains(k: IpKnots, x: Float) -> Bool []
+    todo("interpolate-nv.ipknots.contains")
+
+// Whether the knots are equally spaced, to within a relative tolerance.
+//
+// Worth asking because a uniform grid makes the interval search
+// arithmetic rather than a binary search, which an implementation may
+// specialise on — and because a caller who believes their data is
+// uniform and finds it is not has learned something about their data.
+pub fn is_uniform(k: IpKnots, tolerance: Float) -> Bool []
+    todo("interpolate-nv.ipknots.is_uniform")
+
+// A regular grid of `count` points from `lo` to `hi` inclusive.
+//
+// The x axis a resample writes onto.  `IpBadGrid` for a count below 1,
+// and a count of exactly 1 answers `[lo]`, which is the degenerate case
+// numpy's `linspace` also admits.  `hi` below `lo` is accepted and
+// answers a descending list — the caller asked for a direction.
+//
+// ```novo
+// use ipknots
+//
+// fn main() [io]
+//     match ipknots.linspace(0.0, 1.0, 3)
+//         Ok(g)  => println("${g[1]}")   // 0.5
+//         Err(e) => println(e.message())
+// ```
+pub fn linspace(lo: Float, hi: Float, count: Int) -> Result<[Float], IpFault> []
+    todo("interpolate-nv.ipknots.linspace")
