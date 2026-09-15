@@ -1,6 +1,6 @@
 [package]
 name        = "interpolate-nv"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "Interpolation over sorted knots, as a value built once and evaluated many times: linear and nearest, the cubic spline in its three boundary conditions, Akima and PCHIP where a spline would overshoot, with an extrapolation policy the caller names.  Derivatives, antiderivatives and definite integrals of a spline, resampling onto a new grid, bilinear and bicubic over a regular 2-D grid of ndarray-nv values, and the B-spline basis underneath.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 
