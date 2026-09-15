@@ -219,12 +219,12 @@ with the two axis lists.
   which a caller builds in two lines.
 - **Complex-valued interpolation.** novo-lang has no complex type, so
   the real and imaginary parts are two curves.
-- **A microcontroller build.** A curve owns its knots and its
-  coefficients as lists, and a build for a device with no heap allocator
-  refuses a list literal (SPEC section 14.4). A sensor calibration table
-  on a device wants a value type with a fixed knot count and inline
-  arrays, which is a different type. This package makes no device claim
-  and ships no device probe.
+- **A microcontroller build.** A curve owns its knots and its coefficients as
+  lists, and a build for a device with no heap allocator refuses a list
+  literal (SPEC section 14.4). A sensor calibration table on a device wants a
+  value type with a fixed knot count and inline arrays, which is a different
+  type. Nothing here is claimed to build for such a device, and there is no
+  `tests/embedded_probe.nv`.
 
 ## Related packages
 
