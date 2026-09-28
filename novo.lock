@@ -3,6 +3,6 @@
 [ndarray-nv]
 source = "registry"
 url = "https://registry.novo-lang.org"
-req = "^0.0.1"
-version = "0.0.1"
-hash = "defa416d14f51e444655d592ac3cf63538e895195e305a82a04cc251ee2cd934"
+req = "^0.1.4"
+version = "0.1.4"
+hash = "e7a67642411a0e62f88f53f54b4749e3c83b34a892ba568f40c49f5b538e1cff"
